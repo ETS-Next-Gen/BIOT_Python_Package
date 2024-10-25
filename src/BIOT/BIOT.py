@@ -8,10 +8,14 @@ Functions and classes for the BIOT module
 
 import pandas as pd 
 import numpy as np
+import torch
+from TorchL1 import TorchL1
+
 from sklearn.linear_model import Lasso
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import TransformedTargetRegressor
 import math
+from scipy.stats import mannwhitneyu
 
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_array, check_is_fitted
@@ -24,7 +28,7 @@ from sklearn.pipeline import Pipeline
 
 # Functions and classes
 
-def Get_W_Lasso (X, Y, lam, fit_intercept = False):
+def Get_W_Lasso (X, Y, lam, fit_intercept = False, mode='cpu'):
     """
     Estimates multiple Lasso models (one for each column of Y).
 
@@ -51,18 +55,31 @@ def Get_W_Lasso (X, Y, lam, fit_intercept = False):
         Vector of m model intercepts 
     """
     
+
     k = Y.shape[1]
     d = X.shape[1]
     W = np.zeros((d, k))
     w0 = np.zeros(k)
-    # Fit Lasso for each dimension of Y
-    for dim_index in range(k):
-        model = Lasso(alpha = lam, fit_intercept = fit_intercept, max_iter = 5000)
-        model.fit(X = X, y = Y[:, dim_index])
-        W[:, dim_index] = model.coef_
-        if fit_intercept:
-            w0[dim_index] = model.intercept_
-        
+    if fit_intercept:
+        mode = 'cpu'
+    print('.', end='', flush=True)
+    # Fit Lasso for each dimension of Y   
+    if mode != 'cpu':
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")        
+        model = TorchL1(alpha=lam, max_iter=5000, tol=1e-6)
+        model.coef_ = torch.zeros(k, d).to(device).T
+        model.alpha *= Y.shape[0]
+        X_ = torch.from_numpy(X).float().to(device)
+        Y_ = torch.from_numpy(Y).float().to(device)
+        model.fit(X=X_, y=Y_)
+        W = model.coef_.detach().cpu().numpy()
+    else:
+        for dim_index in range(k):    
+            model = Lasso(alpha = lam, fit_intercept = fit_intercept, max_iter = 5000)
+            model.fit(X = X, y = Y[:, dim_index])
+            W[:, dim_index] = model.coef_
+            if fit_intercept:
+                w0[dim_index] = model.intercept_
     return W, w0
 
 def Global_L1_Norm (W):
@@ -126,7 +143,7 @@ def BIOT_Crit (X, Y, R, W, w0, lam):
     
     return crit
 
-def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit_intercept = False):
+def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit_intercept = False, mode='cpu'):
     """
     Fits a BIOT model.
 
@@ -166,7 +183,7 @@ def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit
     numpy.ndarray
         Vector of m model intercepts 
     """
-    
+    print('lambda: ' + str(lam))
     d = X.shape[1]
     n = X.shape[0]
     lam_norm = lam/np.sqrt(d)
@@ -174,11 +191,11 @@ def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit
     # If R is provided, get Lasso solution only
     if R is not None:
         YR = Y @ R
-        W, w0 = Get_W_Lasso(X = X, Y = YR, lam = lam_norm, fit_intercept=fit_intercept)
+        W, w0 = Get_W_Lasso(X = X, Y = YR, lam = lam_norm, fit_intercept=fit_intercept, mode=mode)
     # Otherwise, run BIOT iterations
     else:
         # Init W
-        W, w0 = Get_W_Lasso(X = X, Y = Y, lam = lam_norm, fit_intercept=fit_intercept)
+        W, w0 = Get_W_Lasso(X = X, Y = Y, lam = lam_norm, fit_intercept=fit_intercept, mode=mode)
         
         diff = math.inf
         iter_index = 0
@@ -187,8 +204,18 @@ def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit
         while iter_index < max_iter and diff > eps:
             
             # UPDATE R
-            u, s, v = np.linalg.svd((1/(2*n)) * Y.T @ (np.tile(w0, (n, 1)) + (X @ W)))
-        
+            if mode != 'cpu':
+                device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")        
+
+                De = torch.from_numpy((1/(2*n)) * Y.T @ (np.tile(w0, (n, 1)) + (X @ W))).to(device)
+                u, s, v = torch.linalg.svd(De, driver='gesvd')
+            
+                u = u.detach().cpu().numpy()
+                s = s.detach().cpu().numpy()
+                v = v.detach().cpu().numpy()
+            else:
+                u, s, v = np.linalg.svd((1/(2*n)) * Y.T @ (np.tile(w0, (n, 1)) + (X @ W)))
+
             # rotation matrix desired (counterclockwise)
             if rotation:
                 sv = np.ones(len(s))
@@ -201,7 +228,7 @@ def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit
                 
             # UPDATE W
             YR = Y @ R
-            W, w0 = Get_W_Lasso(X = X, Y = YR, lam = lam_norm, fit_intercept = fit_intercept)
+            W, w0 = Get_W_Lasso(X = X, Y = YR, lam = lam_norm, fit_intercept = fit_intercept, mode=mode)      
             
             # CHECK CONVERGENCE
             crit_list.append(BIOT_Crit(X = X, Y = Y, R = R, W = W, w0 = w0, lam = lam_norm))
@@ -209,7 +236,6 @@ def BIOT (X, Y, lam, max_iter = 500, eps = 1e-6, rotation = False, R = None, fit
     
             iter_index += 1
             
-       
     return R, W, w0
 
 class BIOTRegressor(BaseEstimator, RegressorMixin):
@@ -217,7 +243,7 @@ class BIOTRegressor(BaseEstimator, RegressorMixin):
     BIOT class, inherits methods from BaseEstimator and RegressorMixin classes
     from sklearn.base
     """
-    def __init__(self, lam = 1, R = None, rotation = False, fit_intercept = False, feature_names = None):
+    def __init__(self, lam = 1, R = None, rotation = False, fit_intercept = False, feature_names = None, mode='cpu'):
         """
         Parameters
         ----------
@@ -238,7 +264,7 @@ class BIOTRegressor(BaseEstimator, RegressorMixin):
             dimensions
             (Default value = None)
         """
-        
+        self.mode = mode
         self.lam = lam
         self.R = R
         self.rotation = rotation
@@ -266,7 +292,7 @@ class BIOTRegressor(BaseEstimator, RegressorMixin):
         X = check_array(X)
         Y = check_array(Y)
         
-        R, W, w0 = BIOT(X = X, Y = Y, lam = self.lam, rotation = self.rotation, R = self.R, fit_intercept = self.fit_intercept)
+        R, W, w0 = BIOT(X = X, Y = Y, lam = self.lam, rotation = self.rotation, R = self.R, fit_intercept = self.fit_intercept, mode=self. mode)
         self.R_ = R
         self.W_ = pd.DataFrame(W, index = self.feature_names)
         self.w0_ = w0
@@ -327,12 +353,12 @@ class myPipe(Pipeline):
 
         self.R_ = self.steps[-1][-1].R_
         self.W_ = self.steps[-1][-1].W_
-        self.w0_ = self.steps[-1][-1].w0_
-        
+        self.w0_ = self.steps[-1][-1].w0_       
+        self.mse_ = self.steps[-1][-1].mse_
         
         return
 
-def CV_BIOT (X_train, X_test, Y_train, lam_list, fit_intercept = False, num_folds=10, random_state = 1, R = None, rotation = False, scoring = 'neg_mean_squared_error'):
+def CV_BIOT (X_train, Y_train, feature_names, lam_list, fit_intercept = False, num_folds=10, random_state = 1, R = None, rotation = False, scoring = 'neg_mean_squared_error', mode='cpu'):
     """
     Cross-validated BIOT.
     
@@ -387,19 +413,12 @@ def CV_BIOT (X_train, X_test, Y_train, lam_list, fit_intercept = False, num_fold
         Vector of m model intercepts for the final model
     numpy.ndarray
         Orthogonal transformation matrix (m x m) for the final model
-    """
-   
-    if isinstance(X_train, pd.DataFrame):
-        feature_names = X_train.columns
-        
-    else:
-        feature_names = np.array(range(X_train.shape[0]))
-        
+    """      
      
     # define the model pipeline
     pipe = myPipe([
          ('sc', StandardScaler()),
-         ('BIOT', BIOTRegressor(R = R, rotation = rotation, fit_intercept = fit_intercept, feature_names = feature_names))
+         ('BIOT', BIOTRegressor(R = R, rotation = rotation, fit_intercept = fit_intercept, feature_names = feature_names, mode=mode))
      ])        
     
     space = dict()
@@ -414,15 +433,39 @@ def CV_BIOT (X_train, X_test, Y_train, lam_list, fit_intercept = False, num_fold
     search.fit(X_train, Y_train)
     # get the best performing model fit on the whole training set
     best_model = search.best_estimator_
-    # evaluate model on the hold out dataset
-    Yhat = best_model.predict(X_test)
+
+    # Extract the array of MSEs for each fold.
+    search_array = []
+    for idx in range(num_folds):
+        label = 'split' + str(idx) + "_test_score"
+        currentSplit = search.cv_results_[label]
+        search_array.append(currentSplit)
+    # Transpose it to get the MSEs for a single lambda value on the same row
+    search_array = np.transpose(search_array)
+    print(search_array)
+
+    minimum_mse = search_array[search.best_index_]
+    pval = 0
+    best_idx = 0
+    for idx in range(search.best_index_+1, num_folds):
+        current_mse = search_array[idx]
+        pval = 1
+        if sum(minimum_mse - abs(current_mse)) != 0:
+            result = mannwhitneyu(minimum_mse, current_mse, alternative='two-sided', method='exact', use_continuity=True)
+            pval = result[1]
+        print(str(idx) + '\t' + str(pval))
+        if pval<0.05:
+            break;
+        best_idx = idx   
+    print('The lambda value that produces the sparsest model not significantly different from the model with the lowest mse is at index: ' + str(best_idx))
+
+    sc = StandardScaler()
+    X_norm = sc.fit_transform(X)
+    sc = StandardScaler(with_std=False)
+    Y_norm = sc.fit_transform(Y)
+    R, W, w0 = BIOT (X_norm, Y_norm, lam_list[best_idx], max_iter = 500, eps = 1e-6, rotation = False, R = None, fit_intercept = False,mode='gpu')
     
-    
-    W = best_model.regressor_.W_
-    R = best_model.regressor_.R_
-    w0 = best_model.regressor_.w0_
-    
-    return Yhat, W, w0, R
+    return best_idx, R, W, w0
 
 
 def calc_max_lam (X, Y):
@@ -452,3 +495,43 @@ def calc_max_lam (X, Y):
     max_lam = np.max(np.absolute(X_norm.T @ Y_norm))/n
     
     return max_lam
+
+def normalize(X, mean, std):
+  return (X - mean) / std
+
+from sklearn.preprocessing import StandardScaler
+   
+datasets = "datasets/"
+output = "output/"  
+#Y = np.genfromtxt(f"{datasets}/embeddings.csv", delimiter=',', dtype='float64')
+#X =  np.genfromtxt(f"{datasets}/features.csv", delimiter=',', skip_header=1, dtype='float64')
+Y = pd.read_csv(f"{datasets}/embeddings2.csv",header=None)
+X = pd.read_csv(f"{datasets}/features2.csv",header=0)
+
+numLambdas = 10
+lam_list = np.geomspace(.0001, 3.5, numLambdas)
+print('Lambda values:')
+print(lam_list)
+fit_intercept = False
+num_folds=10
+random_state = 1
+R = None
+rotation = False
+scoring = 'neg_mean_squared_error'
+         
+if isinstance(X, pd.DataFrame):
+    feature_names = X.columns       
+else:
+    feature_names = np.array(range(X.shape[0]))
+
+best_idx, R, W, w0 = CV_BIOT (X, Y, feature_names, lam_list, fit_intercept = False, num_folds=num_folds, random_state = random_state, R = R, rotation = rotation, scoring = scoring, mode='gpu')
+
+Weights = pd.DataFrame(W)
+Weights.index = feature_names
+Weights.to_csv('output/weights_best.csv')
+
+Rotation = pd.DataFrame(R)
+Rotation.to_csv('output/rotation_best.csv')
+
+Intercepts = pd.DataFrame(w0)
+Intercepts.to_csv('output/intercepts_best.csv')
