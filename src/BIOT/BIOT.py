@@ -354,7 +354,6 @@ class myPipe(Pipeline):
         self.R_ = self.steps[-1][-1].R_
         self.W_ = self.steps[-1][-1].W_
         self.w0_ = self.steps[-1][-1].w0_       
-        self.mse_ = self.steps[-1][-1].mse_
         
         return
 
