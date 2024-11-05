@@ -24,6 +24,9 @@ from sklearn.model_selection import KFold
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 
+from sklearn.preprocessing import StandardScaler
+import argparse
+
 ###############################################################################
 
 # Functions and classes
@@ -498,39 +501,53 @@ def calc_max_lam (X, Y):
 def normalize(X, mean, std):
   return (X - mean) / std
 
-from sklearn.preprocessing import StandardScaler
-   
-datasets = "datasets/"
-output = "output/"  
-#Y = np.genfromtxt(f"{datasets}/embeddings.csv", delimiter=',', dtype='float64')
-#X =  np.genfromtxt(f"{datasets}/features.csv", delimiter=',', skip_header=1, dtype='float64')
-Y = pd.read_csv(f"{datasets}/embeddings2.csv",header=None)
-X = pd.read_csv(f"{datasets}/features2.csv",header=0)
+parser = argparse.ArgumentParser()
+parser.add_argument('-e','--embeddingFile', help='csv file containing the embeddings to be predicted', default="embeddings2.csv")
+parser.add_argument('-p','--predictorFile', help='csv file containing the predictors to use to predict the embeddings', default="features2.csv")
+parser.add_argument('-d','--dataPath', help='common path for the embedding and predictor files', default="./datasets")
+parser.add_argument('-o','--outputPath', help='path to location in which to store the output files', default="./output")
+parser.add_argument('-s','--suffix', help='suffix to identify output files from those in other runs', default="best")
+parser.add_argument('-l','--numLambdas', help='number of lamba values to calculate', type=int, default=10)
+parser.add_argument('-m','--min', help='minimum lambda value', type=float, default=.0001)
+parser.add_argument('-x','--max', help='maximum lambda value', type=float, default=3.5)
+parser.add_argument('-f','--numFolds', help='maximum lambda value', type=int, default=10)
+parser.add_argument('-a','--random_state', help='random state to use', type=int, default=1)
+parser.add_argument('-c','--scoring', help='scoring algorithm to use in CV', default='neg_mean_squared_error')
+parser.add_argument('-r','--rotation', help='Force rotation not orthogonal transformation', action="store_true")
+parser.add_argument('-t','--fit_intercept', help='Force lasso to fit intercept', action="store_true")
+parser.add_argument('-u','--mode', help='Processing mode (cpu or gpu)', default='cpu')
 
-numLambdas = 10
-lam_list = np.geomspace(.0001, 3.5, numLambdas)
+args = parser.parse_args()
+
+embeddingPath = f"{args.dataPath}/{args.embeddingFile}"
+predictorPath = f"{args.dataPath}/{args.predictorFile}"
+Y = pd.read_csv(embeddingPath,header=None)
+X = pd.read_csv(predictorPath,header=0)
+
+lam_list = np.geomspace(args.min, args.max, args.numLambdas)
 print('Lambda values:')
 print(lam_list)
-fit_intercept = False
-num_folds=10
+
 random_state = 1
 R = None
-rotation = False
-scoring = 'neg_mean_squared_error'
          
 if isinstance(X, pd.DataFrame):
     feature_names = X.columns       
 else:
     feature_names = np.array(range(X.shape[0]))
 
-best_idx, R, W, w0 = CV_BIOT (X, Y, feature_names, lam_list, fit_intercept = False, num_folds=num_folds, random_state = random_state, R = R, rotation = rotation, scoring = scoring, mode='gpu')
+best_idx, R, W, w0 = CV_BIOT (X, Y, feature_names, lam_list, fit_intercept = args.fit_intercept, num_folds=args.numFolds, random_state = args.random_state, R = R, rotation = args.rotation, scoring = args.scoring, mode=args.mode)
 
 Weights = pd.DataFrame(W)
 Weights.index = feature_names
-Weights.to_csv('output/weights_best.csv')
+weightfile = f"{args.outputPath}/weights_{suffix}.csv"
+Weights.to_csv(weightfile)
 
+rotationfile = f"{args.outputPath}/rotation_{suffix}.csv"
 Rotation = pd.DataFrame(R)
-Rotation.to_csv('output/rotation_best.csv')
+Rotation.to_csv(rotationfile)
 
+interceptfile = f"{args.outputPath}/intercepts_{suffix}.csv"
 Intercepts = pd.DataFrame(w0)
-Intercepts.to_csv('output/intercepts_best.csv')
+Intercepts.to_csv(interceptfile)
+
